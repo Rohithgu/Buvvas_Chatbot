@@ -1,59 +1,70 @@
 import asyncio
 import json
-import os
 import sys
-import traceback
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
 # ============================================================
-# PATHS
+# PATH CONFIGURATION
 # ============================================================
 
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
+# Get the folder where this mcp_client.py file exists
+BASE_DIR = Path(__file__).resolve().parent
 
-SERVER_PATH = os.path.join(
-    BASE_DIR,
-    "mcp_server",
-    "server.py"
-)
-
-PYTHON_EXE = sys.executable
+# Your server.py is in the SAME folder as mcp_client.py
+SERVER_PATH = BASE_DIR / "server.py"
 
 
 # ============================================================
-# PRINT REAL EXCEPTION
+# LOGGING
 # ============================================================
 
-def print_exception_tree(exc, level=0):
-
-    prefix = "  " * level
+def log(message):
+    """
+    Print logs to stderr so they appear in Streamlit logs
+    without interfering with MCP communication.
+    """
 
     print(
-        f"{prefix}{type(exc).__name__}: {exc}",
+        message,
         file=sys.stderr,
         flush=True
     )
 
-    if isinstance(exc, BaseExceptionGroup):
 
-        for child in exc.exceptions:
+# ============================================================
+# CHECK SERVER FILE
+# ============================================================
 
-            print_exception_tree(
-                child,
-                level + 1
-            )
+def check_server():
+
+    log(
+        f"[MCP CLIENT] Looking for server: {SERVER_PATH}"
+    )
+
+    if not SERVER_PATH.exists():
+
+        log(
+            f"[MCP CLIENT] ERROR: server.py not found!"
+        )
+
+        return False
+
+    log(
+        "[MCP CLIENT] server.py found successfully"
+    )
+
+    return True
 
 
 # ============================================================
-# MCP CALL
+# ASYNC MCP TOOL CALL
 # ============================================================
 
-async def call_mcp_tool(
+async def _run_mcp_tool(
     tool_name,
     arguments=None
 ):
@@ -61,70 +72,60 @@ async def call_mcp_tool(
     if arguments is None:
         arguments = {}
 
-    print(
-        "\n" + "=" * 70,
-        file=sys.stderr,
-        flush=True
+
+    # --------------------------------------------------------
+    # CHECK SERVER
+    # --------------------------------------------------------
+
+    if not check_server():
+
+        return {
+            "success": False,
+            "count": 0,
+            "products": [],
+            "error": (
+                f"MCP server not found: {SERVER_PATH}"
+            )
+        }
+
+
+    log(
+        "[MCP CLIENT] STARTING"
     )
 
-    print(
-        "[MCP CLIENT] STARTING",
-        file=sys.stderr,
-        flush=True
+    log(
+        f"[MCP CLIENT] Server: {SERVER_PATH}"
     )
 
-    print(
-        f"[MCP CLIENT] Python: {PYTHON_EXE}",
-        file=sys.stderr,
-        flush=True
+    log(
+        f"[MCP CLIENT] Tool: {tool_name}"
     )
 
-    print(
-        f"[MCP CLIENT] Server: {SERVER_PATH}",
-        file=sys.stderr,
-        flush=True
+    log(
+        f"[MCP CLIENT] Arguments: {arguments}"
     )
 
-    print(
-        f"[MCP CLIENT] Tool: {tool_name}",
-        file=sys.stderr,
-        flush=True
-    )
 
-    print(
-        f"[MCP CLIENT] Arguments: {arguments}",
-        file=sys.stderr,
-        flush=True
-    )
-
-    print(
-        "=" * 70,
-        file=sys.stderr,
-        flush=True
-    )
-
+    # --------------------------------------------------------
+    # START MCP SERVER
+    # --------------------------------------------------------
 
     server_params = StdioServerParameters(
 
-        command=PYTHON_EXE,
+        command=sys.executable,
 
         args=[
-            SERVER_PATH
-        ],
+            str(SERVER_PATH)
+        ]
 
-        env={
-            **os.environ
-        }
     )
 
 
     try:
 
-        print(
-            "[MCP CLIENT] Connecting to server...",
-            file=sys.stderr,
-            flush=True
-        )
+        # ----------------------------------------------------
+        # CONNECT TO MCP SERVER
+        # ----------------------------------------------------
 
         async with stdio_client(
             server_params
@@ -133,107 +134,273 @@ async def call_mcp_tool(
             write_stream
         ):
 
-            print(
-                "[MCP CLIENT] STDIO CONNECTED",
-                file=sys.stderr,
-                flush=True
+            log(
+                "[MCP CLIENT] STDIO CONNECTED"
             )
 
+
+            # ------------------------------------------------
+            # CREATE MCP SESSION
+            # ------------------------------------------------
 
             async with ClientSession(
                 read_stream,
                 write_stream
             ) as session:
 
-                print(
-                    "[MCP CLIENT] INITIALIZING SESSION",
-                    file=sys.stderr,
-                    flush=True
+
+                log(
+                    "[MCP CLIENT] Initializing session..."
                 )
 
+
+                # --------------------------------------------
+                # INITIALIZE MCP
+                # --------------------------------------------
 
                 await session.initialize()
 
 
-                print(
-                    "[MCP CLIENT] SESSION INITIALIZED",
-                    file=sys.stderr,
-                    flush=True
+                log(
+                    "[MCP CLIENT] MCP SESSION INITIALIZED"
                 )
 
 
-                print(
-                    "[MCP CLIENT] CALLING TOOL...",
-                    file=sys.stderr,
-                    flush=True
-                )
-
+                # --------------------------------------------
+                # CALL TOOL
+                # --------------------------------------------
 
                 result = await session.call_tool(
+
                     tool_name,
-                    arguments
+
+                    arguments=arguments
+
                 )
 
 
-                print(
-                    "[MCP CLIENT] TOOL SUCCESS",
-                    file=sys.stderr,
-                    flush=True
+                log(
+                    "[MCP CLIENT] TOOL EXECUTED"
                 )
 
 
-                return result
+                # --------------------------------------------
+                # EXTRACT RESULT
+                # --------------------------------------------
 
-
-    except BaseExceptionGroup as eg:
-
-        print(
-            "\n[MCP CLIENT] REAL TASKGROUP ERROR:",
-            file=sys.stderr,
-            flush=True
-        )
-
-        print_exception_tree(
-            eg
-        )
-
-        print(
-            "\n[MCP CLIENT] FULL TRACEBACK:",
-            file=sys.stderr,
-            flush=True
-        )
-
-        traceback.print_exception(
-            eg,
-            file=sys.stderr
-        )
-
-        raise
+                return extract_mcp_result(
+                    result
+                )
 
 
     except Exception as e:
 
-        print(
-            "\n[MCP CLIENT] REAL ERROR:",
-            file=sys.stderr,
-            flush=True
+        log(
+            f"[MCP CLIENT] ERROR: {repr(e)}"
         )
 
-        print(
-            f"{type(e).__name__}: {e}",
-            file=sys.stderr,
-            flush=True
-        )
+        return {
 
-        traceback.print_exc(
-            file=sys.stderr
-        )
+            "success": False,
 
-        raise
+            "count": 0,
+
+            "products": [],
+
+            "error": str(e)
+
+        }
 
 
 # ============================================================
-# SYNC WRAPPER
+# EXTRACT MCP RESULT
+# ============================================================
+
+def extract_mcp_result(result):
+
+    """
+    Convert MCP CallToolResult into normal Python data.
+    """
+
+    if result is None:
+
+        return {
+            "success": False,
+            "count": 0,
+            "products": [],
+            "error": "Empty MCP response"
+        }
+
+
+    # --------------------------------------------------------
+    # Check structured content
+    # --------------------------------------------------------
+
+    structured = getattr(
+        result,
+        "structuredContent",
+        None
+    )
+
+
+    if structured is None:
+
+        structured = getattr(
+            result,
+            "structured_content",
+            None
+        )
+
+
+    if structured:
+
+        if isinstance(
+            structured,
+            dict
+        ):
+
+            return structured
+
+
+    # --------------------------------------------------------
+    # Extract normal MCP content
+    # --------------------------------------------------------
+
+    content = getattr(
+        result,
+        "content",
+        []
+    )
+
+
+    text_parts = []
+
+
+    for item in content:
+
+        text_value = getattr(
+            item,
+            "text",
+            None
+        )
+
+        if text_value:
+
+            text_parts.append(
+                text_value
+            )
+
+
+    # --------------------------------------------------------
+    # Nothing returned
+    # --------------------------------------------------------
+
+    if not text_parts:
+
+        return {
+
+            "success": False,
+
+            "count": 0,
+
+            "products": [],
+
+            "error": "MCP returned no content"
+
+        }
+
+
+    # --------------------------------------------------------
+    # Combine text
+    # --------------------------------------------------------
+
+    combined_text = "\n".join(
+        text_parts
+    ).strip()
+
+
+    # --------------------------------------------------------
+    # Try JSON
+    # --------------------------------------------------------
+
+    try:
+
+        parsed = json.loads(
+            combined_text
+        )
+
+        if isinstance(
+            parsed,
+            dict
+        ):
+
+            return parsed
+
+        return {
+            "success": True,
+            "count": 0,
+            "products": parsed
+        }
+
+
+    except json.JSONDecodeError:
+
+        pass
+
+
+    # --------------------------------------------------------
+    # Try extracting JSON from text
+    # --------------------------------------------------------
+
+    start = combined_text.find("{")
+
+    end = combined_text.rfind("}")
+
+
+    if start != -1 and end != -1:
+
+        possible_json = combined_text[
+            start:end + 1
+        ]
+
+
+        try:
+
+            parsed = json.loads(
+                possible_json
+            )
+
+            if isinstance(
+                parsed,
+                dict
+            ):
+
+                return parsed
+
+        except json.JSONDecodeError:
+
+            pass
+
+
+    # --------------------------------------------------------
+    # Return raw text
+    # --------------------------------------------------------
+
+    return {
+
+        "success": True,
+
+        "count": 0,
+
+        "products": [],
+
+        "text": combined_text
+
+    }
+
+
+# ============================================================
+# SYNCHRONOUS MCP TOOL FUNCTION
 # ============================================================
 
 def run_mcp_tool(
@@ -241,63 +408,142 @@ def run_mcp_tool(
     arguments=None
 ):
 
-    return asyncio.run(
-        call_mcp_tool(
-            tool_name,
-            arguments
-        )
-    )
-
-
-# ============================================================
-# EXTRACT TEXT
-# ============================================================
-
-def extract_mcp_text(result):
-
-    if not result:
-        return ""
+    """
+    Synchronous wrapper used by Streamlit.
+    """
 
     try:
 
-        for item in result.content:
-
-            if hasattr(
-                item,
-                "text"
-            ):
-
-                return item.text
-
-    except Exception:
-        pass
-
-    return ""
-
-
-# ============================================================
-# EXTRACT JSON
-# ============================================================
-
-def extract_mcp_json(result):
-
-    text = extract_mcp_text(
-        result
-    )
-
-    if not text:
-
-        return {}
-
-    try:
-
-        return json.loads(
-            text
+        return asyncio.run(
+            _run_mcp_tool(
+                tool_name,
+                arguments
+            )
         )
 
-    except json.JSONDecodeError:
+    except RuntimeError as e:
+
+        # ----------------------------------------------------
+        # Handle an already running asyncio event loop
+        # ----------------------------------------------------
+
+        log(
+            f"[MCP CLIENT] Runtime error: {repr(e)}"
+        )
 
         return {
+
             "success": False,
-            "error": text
+
+            "count": 0,
+
+            "products": [],
+
+            "error": str(e)
+
         }
+
+
+# ============================================================
+# ALIAS
+# ============================================================
+
+def call_mcp_tool(
+    tool_name,
+    arguments=None
+):
+
+    """
+    Alias in case app.py uses call_mcp_tool().
+    """
+
+    return run_mcp_tool(
+        tool_name,
+        arguments
+    )
+
+
+# ============================================================
+# SEARCH PRODUCTS
+# ============================================================
+
+def search_products(
+    query
+):
+
+    return run_mcp_tool(
+
+        "search_products",
+
+        {
+            "query": query
+        }
+
+    )
+
+
+# ============================================================
+# GET PRODUCT DETAILS
+# ============================================================
+
+def get_product_details(
+    product_id
+):
+
+    return run_mcp_tool(
+
+        "get_product_details",
+
+        {
+            "product_id": product_id
+        }
+
+    )
+
+
+# ============================================================
+# LIST CATEGORIES
+# ============================================================
+
+def list_categories():
+
+    return run_mcp_tool(
+
+        "list_categories",
+
+        {}
+
+    )
+
+
+# ============================================================
+# TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    log(
+        "=========================================="
+    )
+
+    log(
+        "BUVVAS MCP CLIENT TEST"
+    )
+
+    log(
+        "=========================================="
+    )
+
+
+    result = search_products(
+        "barcode scanner"
+    )
+
+
+    print(
+        json.dumps(
+            result,
+            indent=2,
+            ensure_ascii=False
+        )
+    )
