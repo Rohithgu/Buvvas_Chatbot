@@ -44,6 +44,121 @@ if "cheaper_for" not in st.session_state:
 
 
 # ============================================================
+# CONVERSATIONAL MEMORY
+# ============================================================
+
+if "conversation_context" not in st.session_state:
+    st.session_state.conversation_context = {
+        "last_query": "",
+        "last_category": "All",
+        "last_budget": None,
+        "last_products": [],
+    }
+
+if "memory_enabled" not in st.session_state:
+    st.session_state.memory_enabled = True
+
+if "pending_product_category" not in st.session_state:
+    st.session_state.pending_product_category = "All"
+
+if "pending_product_request" not in st.session_state:
+    st.session_state.pending_product_request = ""
+
+
+def is_follow_up_query(query):
+    """Detect short/natural follow-up questions that depend on previous context."""
+    q = query.lower().strip()
+
+    follow_up_phrases = [
+        "only ", "just ", "also ", "what about", "how about",
+        "cheaper", "cheapest", "lower price", "less expensive",
+        "more expensive", "best one", "which one", "which is best",
+        "compare them", "compare these", "the first", "the second",
+        "the third", "those", "these", "them", "same", "another",
+        "show more", "more options", "other options", "similar ones",
+        "similar products", "in stock", "available ones",
+        "remove ", "without "
+    ]
+
+    if any(q.startswith(p) or p in q for p in follow_up_phrases):
+        return True
+
+    # Very short queries are usually follow-ups.
+    return len(q.split()) <= 5
+
+
+def build_contextual_query(query):
+    """
+    Combine a follow-up with the previous search context.
+
+    Examples:
+      Previous: "printer under 5000"
+      Current:  "only thermal"
+      Result:   "printer under 5000 only thermal"
+
+      Previous: "barcode scanner under 3000"
+      Current:  "show cheaper ones"
+      Result:   "barcode scanner under 3000"
+    """
+    if not st.session_state.get("memory_enabled", True):
+        return query
+
+    context = st.session_state.get("conversation_context", {})
+    previous = str(context.get("last_query", "")).strip()
+
+    if not previous or not is_follow_up_query(query):
+        return query
+
+    q = query.lower().strip()
+
+    # Actions that should operate on the current result set rather
+    # than performing a brand-new MCP search.
+    if any(x in q for x in [
+        "cheaper", "cheapest", "lower price", "less expensive"
+    ]):
+        return previous
+
+    if any(x in q for x in [
+        "best one", "which one", "which is best",
+        "compare them", "compare these"
+    ]):
+        return previous
+
+    return f"{previous} {query}".strip()
+
+
+def update_conversation_memory(query, category, max_price, products):
+    """Persist the latest shopping context for the current session."""
+    st.session_state.conversation_context = {
+        "last_query": query,
+        "last_category": category,
+        "last_budget": max_price,
+        "last_products": products or [],
+    }
+
+
+def get_memory_summary():
+    """Return a small human-readable memory summary for the UI."""
+    context = st.session_state.get("conversation_context", {})
+    query = context.get("last_query", "")
+    category = context.get("last_category", "All")
+    budget = context.get("last_budget")
+
+    if not query:
+        return "No shopping context yet."
+
+    parts = [f"Last search: {query}"]
+
+    if category and category != "All":
+        parts.append(f"Category: {category}")
+
+    if budget is not None:
+        parts.append(f"Budget: {format_price(budget)}")
+
+    return " • ".join(parts)
+
+
+# ============================================================
 # CSS
 # ============================================================
 
@@ -660,38 +775,80 @@ def call_search(query):
         return []
 
 
+def apply_conversational_keywords(products, query):
+    """Narrow the current result set using simple follow-up keywords."""
+    q = query.lower()
+
+    keywords = [
+        "thermal", "receipt", "label",
+        "bluetooth", "wireless", "portable"
+    ]
+
+    for keyword in keywords:
+        if keyword in q:
+            filtered = []
+
+            for product in products:
+                haystack = " ".join(
+                    str(product.get(k, ""))
+                    for k in [
+                        "name", "description",
+                        "category", "brand", "type"
+                    ]
+                ).lower()
+
+                if keyword in haystack:
+                    filtered.append(product)
+
+            if filtered:
+                products = filtered
+
+    return products
+
+
 def get_search_products(query):
     """
-    Search MCP and apply our application-level filters.
+    Search MCP while preserving conversational context.
 
-    This is important because the MCP server currently performs
-    keyword search, while app.py handles natural-language
-    requirements such as price limits.
+    The current query is first combined with the previous query when
+    it looks like a follow-up. This lets users say things like:
+
+        "I need a printer under 5000"
+        "Only thermal"
+        "Show cheaper ones"
+
+    without repeating the complete request.
     """
 
-    category = extract_category(query)
-    max_price = extract_budget(query)
+    contextual_query = build_contextual_query(query)
+
+    category = extract_category(contextual_query)
+    max_price = extract_budget(contextual_query)
+
+    # If the follow-up did not explicitly contain a category/budget,
+    # inherit them from the previous conversation.
+    context = st.session_state.get("conversation_context", {})
+
+    if category == "All" and is_follow_up_query(query):
+        category = context.get("last_category", "All")
+
+    if max_price is None and is_follow_up_query(query):
+        max_price = context.get("last_budget")
 
     # Use a clean MCP query.
-    # MCP does not need to understand "under 2000".
     if category == "Printer":
         mcp_query = "printer"
-
     elif category == "Barcode":
         mcp_query = "barcode scanner"
-
     elif category == "Cash Drawer":
         mcp_query = "cash drawer"
-
     elif category == "POS":
         mcp_query = "POS"
-
     else:
-        mcp_query = query
+        mcp_query = contextual_query
 
     products = call_search(mcp_query)
 
-    # Apply strict category and budget filtering
     products = filter_products(
         products,
         category=category,
@@ -699,7 +856,325 @@ def get_search_products(query):
         stock_only=False
     )
 
-    return products, category, max_price
+    products = apply_conversational_keywords(
+        products,
+        query
+    )
+
+    return products, category, max_price, contextual_query
+
+
+# ============================================================
+# PRODUCT CONVERSATION ACTIONS
+# ============================================================
+
+def find_product_reference(query, products):
+    q = query.lower()
+    matches = []
+
+    for product in products or []:
+        name = str(product.get("name", ""))
+        if name and name.lower() in q:
+            matches.append(product)
+
+    return matches
+
+
+def conversational_product_action(query):
+    """Answer comparison/best-product questions using visible results."""
+    products = st.session_state.get("last_products", []) or []
+    q = query.lower().strip()
+
+    if not products:
+        return None
+
+    if any(x in q for x in [
+        "compare", "difference", "costlier",
+        "more expensive", "cheaper than"
+    ]):
+        mentioned = find_product_reference(query, products)
+
+        if len(mentioned) >= 2:
+            a, b = mentioned[0], mentioned[1]
+            pa = get_product_price(a)
+            pb = get_product_price(b)
+
+            if pa >= pb:
+                expensive, cheaper = a, b
+            else:
+                expensive, cheaper = b, a
+
+            difference = abs(
+                get_product_price(expensive) -
+                get_product_price(cheaper)
+            )
+
+            return (
+                f"Sure! 😊 **{expensive.get('name', 'This product')}** is "
+                f"{format_price(difference)} more expensive than "
+                f"**{cheaper.get('name', 'the other product')}**.\n\n"
+                f"**{expensive.get('name', 'Product')}**: "
+                f"{format_price(get_product_price(expensive))}\n\n"
+                f"**{cheaper.get('name', 'Product')}**: "
+                f"{format_price(get_product_price(cheaper))}"
+            )
+
+        if len(products) >= 2 and (
+            "compare them" in q or "compare these" in q
+        ):
+            a, b = products[0], products[1]
+            return (
+                f"Sure! 😊 **{a.get('name', 'Product 1')}** is "
+                f"{format_price(get_product_price(a))}, while "
+                f"**{b.get('name', 'Product 2')}** is "
+                f"{format_price(get_product_price(b))}. "
+                "I can also help you decide which one is better."
+            )
+
+    if any(x in q for x in [
+        "which is best", "which one is best",
+        "which is better", "which one is better",
+        "recommend one", "best one"
+    ]):
+        ranked = sorted(
+            products,
+            key=lambda x: (
+                not is_available(x),
+                get_product_price(x)
+                if get_product_price(x) > 0 else float("inf")
+            )
+        )
+        best = ranked[0]
+
+        return (
+            f"Based on your current requirement, I'd suggest "
+            f"**{best.get('name', 'this product')}**. 😊\n\n"
+            f"Price: {format_price(get_product_price(best))}\n"
+            f"Status: {'In Stock' if is_available(best) else 'Out of Stock'}"
+        )
+
+    return None
+
+
+# ============================================================
+# NATURAL CONVERSATION / DEMO SHOPPING FLOW
+# ============================================================
+
+def is_greeting(query):
+    return query.lower().strip() in {
+        "hi", "hello", "hey", "hii", "hiii",
+        "good morning", "good afternoon", "good evening"
+    }
+
+
+def detect_product_request(query):
+    q = query.lower()
+    return any(x in q for x in [
+        "printer", "printing machine", "printing",
+        "thermal printer", "receipt printer", "label printer",
+        "barcode", "scanner", "cash drawer", "pos",
+        "pos machine", "billing machine", "billing"
+    ])
+
+
+def detect_business_context(query):
+    q = query.lower()
+    return any(x in q for x in [
+        "restaurant", "resturant", "hotel", "shop", "store",
+        "retail", "supermarket", "business", "cafe", "bakery", "office"
+    ])
+
+
+def product_category_from_query(query):
+    q = query.lower()
+    category = extract_category(query)
+    if category != "All":
+        return category
+    if "printing" in q or "printer" in q:
+        return "Printer"
+    if "barcode" in q or "scanner" in q:
+        return "Barcode"
+    if "cash drawer" in q:
+        return "Cash Drawer"
+    if "pos" in q or "billing" in q:
+        return "POS"
+    return "All"
+
+
+def has_shopping_filter(query):
+    q = query.lower()
+    return (
+        extract_budget(query) is not None
+        or any(x in q for x in [
+            "under", "below", "within", "upto", "up to",
+            "maximum", "max", "budget", "cheap", "cheaper",
+            "cheapest", "thermal", "receipt", "label",
+            "only", "in stock", "available"
+        ])
+    )
+
+
+def natural_conversation(query):
+    """Return a normal conversational reply, or None when catalog search is needed."""
+    q = query.lower().strip()
+
+    if is_greeting(query):
+        return "Hi! 👋 Welcome to BUVVAS. How can I help you today?"
+
+    if q in {"thanks", "thank you", "thankyou", "thx"}:
+        return "You're welcome! 😊 I'm here whenever you need help finding a product."
+
+    if q in {"help", "what can you do", "how can you help me", "what can you help with"}:
+        return (
+            "I can help you find BUVVAS products, filter them by budget, "
+            "compare products, explain recommendations, and find cheaper alternatives. 😊"
+        )
+
+    # First stage: user mentions their business + product, but no filter.
+    if detect_business_context(query) and detect_product_request(query) and not has_shopping_filter(query):
+        category = product_category_from_query(query)
+        st.session_state.pending_product_category = category
+        st.session_state.pending_product_request = query
+        return (
+            "Oh nice! 😊 Do you have any specifications or budget in mind, "
+            "or would you like me to show all the available options?"
+        )
+
+    # Product mentioned without a filter.
+    if detect_product_request(query) and not has_shopping_filter(query):
+        category = product_category_from_query(query)
+        if category != "All":
+            st.session_state.pending_product_category = category
+            st.session_state.pending_product_request = query
+            return (
+                "Sure! 😊 Do you have any specifications or budget in mind, "
+                "or would you like me to show all the available options?"
+            )
+
+    return None
+
+
+def prepare_chat_search_query(query):
+    """Use the pending product category for follow-ups like 'show me under 2000'."""
+    category = st.session_state.get("pending_product_category", "All")
+    if category == "All":
+        return query
+
+    if extract_budget(query) is not None or has_shopping_filter(query):
+        base = {
+            "Printer": "printer",
+            "Barcode": "barcode scanner",
+            "Cash Drawer": "cash drawer",
+            "POS": "POS"
+        }.get(category, "")
+        return f"{base} {query}".strip()
+
+    return query
+
+
+def natural_search_answer(query, products, category, max_price):
+    if max_price is not None:
+        if products:
+            label = {
+                "Printer": "printing machines",
+                "Barcode": "barcode scanners",
+                "Cash Drawer": "cash drawers",
+                "POS": "POS machines"
+            }.get(category, "products")
+            return (
+                f"Oh sure! 😊 Below are the {label} I found "
+                f"under {format_price(max_price)}."
+            )
+        return (
+            f"I checked the BUVVAS catalog, but I couldn't find "
+            f"a matching product under {format_price(max_price)}."
+        )
+
+    if products:
+        return f"Sure! 😊 I found {len(products)} products matching your request."
+    return "I couldn't find a matching product in the BUVVAS catalog."
+
+
+# ============================================================
+# CONVERSATIONAL RESPONSE HELPERS
+# ============================================================
+
+def conversational_answer(user_query, products, category, max_price, contextual_query):
+    """
+    Create a useful response for both normal searches and follow-ups.
+    This intentionally stays deterministic so it works without adding
+    another LLM/API dependency to the existing project.
+    """
+    q = user_query.lower().strip()
+    follow_up = (
+        contextual_query.strip().lower() != user_query.strip().lower()
+    )
+
+    if any(x in q for x in [
+        "cheaper", "cheapest", "lower price", "less expensive"
+    ]):
+        if products:
+            return (
+                f"I used your previous search context and found "
+                f"{len(products)} matching products. "
+                f"You can now choose a lower-priced option."
+            )
+        return "I couldn't find a cheaper matching option from the current catalog."
+
+    if any(x in q for x in [
+        "best one", "which one", "which is best"
+    ]):
+        if products:
+            # Prefer an available product, then the lowest priced product.
+            ranked = sorted(
+                products,
+                key=lambda p: (
+                    not is_available(p),
+                    get_product_price(p) if get_product_price(p) > 0 else float("inf")
+                )
+            )
+            best = ranked[0]
+            return (
+                f"Based on your current search, I recommend "
+                f"**{best.get('name', 'this product')}**. "
+                f"It is {format_price(get_product_price(best))} "
+                f"and is {'in stock' if is_available(best) else 'currently unavailable'}."
+            )
+        return "I don't have enough matching products to choose a best option."
+
+    if any(x in q for x in [
+        "compare them", "compare these"
+    ]):
+        if len(products) >= 2:
+            names = ", ".join(
+                str(p.get("name", "Product")) for p in products[:3]
+            )
+            return f"I kept your previous search context. The products currently available to compare are: {names}."
+        return "I need at least two matching products to compare."
+
+    if follow_up:
+        prefix = "Using your previous search context, "
+    else:
+        prefix = ""
+
+    if max_price is not None:
+        if products:
+            return (
+                f"{prefix}I found {len(products)} BUVVAS products "
+                f"under {format_price(max_price)} that match your request."
+            )
+        return (
+            f"{prefix}I couldn't find any matching products "
+            f"under {format_price(max_price)}."
+        )
+
+    if products:
+        return (
+            f"{prefix}I found {len(products)} BUVVAS products "
+            f"that match your request."
+        )
+
+    return f"{prefix}I couldn't find products matching your request."
 
 
 # ============================================================
@@ -1078,6 +1553,7 @@ st.html("""
 """)
 
 
+
 # ============================================================
 # CATEGORY BUTTONS
 # ============================================================
@@ -1090,6 +1566,7 @@ st.markdown(
 cat1, cat2, cat3, cat4, cat5 = st.columns(5)
 
 categories = [
+    ("All", "All"),
     ("📷 Barcode", "Barcode"),
     ("🖨️ Printer", "Printer"),
     ("💰 Cash Drawer", "Cash Drawer"),
@@ -1160,6 +1637,13 @@ def perform_category_search(category):
     st.session_state.selected_category = category
     st.session_state.current_query = f"Show me {display_name}"
 
+    update_conversation_memory(
+        f"Show me {display_name}",
+        category,
+        None,
+        products
+    )
+
     st.session_state.cheaper_results = []
     st.session_state.cheaper_for = ""
 
@@ -1183,113 +1667,102 @@ for col, (label, category) in zip(
 
 
 # ============================================================
-# SEARCH AREA
+# CHAT INPUT
 # ============================================================
 
-st.markdown("")
-
-user_query = st.text_input(
-    "",
-    placeholder=(
-        "Ask me anything... "
-        "e.g. I need a printer under 2000"
-    ),
-    key="search_input"
+user_query = st.chat_input(
+    "Message BUVVAS... Tell me what you need",
+    key="chat_input"
 )
 
 
 # ============================================================
-# SEARCH BUTTON
+# PROCESS CONVERSATION
 # ============================================================
 
-search_col1, search_col2, search_col3 = st.columns(
-    [1, 2, 1]
-)
-
-with search_col2:
-
-    search_clicked = st.button(
-        "🔍 Search Products",
-        type="primary",
-        use_container_width=True
-    )
-
-
-# ============================================================
-# PROCESS SEARCH
-# ============================================================
-
-if search_clicked and user_query.strip():
+if user_query and user_query.strip():
 
     query = user_query.strip()
-
     st.session_state.current_query = query
 
-    with st.spinner("🤖 MCP is searching BUVVAS products..."):
+    # Questions about products already displayed stay in the conversation.
+    # They are NOT sent back to MCP as a new search query.
+    action_reply = conversational_product_action(query)
 
-        products, category, max_price = get_search_products(
-            query
-        )
+    if action_reply is not None:
 
-    # Clear category-specific old messages.
-    st.session_state.messages = []
-
-    # Build response text
-    if max_price is not None:
-
-        if products:
-
-            answer = (
-                f"I found {len(products)} BUVVAS "
-                f"products under "
-                f"{format_price(max_price)} "
-                f"that match your request."
-            )
-
-        else:
-
-            answer = (
-                f"I couldn't find any matching "
-                f"products under "
-                f"{format_price(max_price)}."
-            )
-
-    else:
-
-        if products:
-
-            answer = (
-                f"I found {len(products)} BUVVAS "
-                f"products that match your request."
-            )
-
-        else:
-
-            answer = (
-                "I couldn't find products matching "
-                "your request."
-            )
-
-    # Save messages
-    st.session_state.messages.append(
-        {
+        st.session_state.messages.append({
             "role": "user",
             "content": query
-        }
+        })
+
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": action_reply,
+            "products": [],
+            "category": st.session_state.get(
+                "pending_product_category", "All"
+            ),
+            "max_price": None
+        })
+
+        st.rerun()
+
+    # Normal conversation first.
+    reply = natural_conversation(query)
+
+    if reply is not None:
+
+        st.session_state.messages.append({
+            "role": "user",
+            "content": query
+        })
+
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": reply,
+            "products": [],
+            "category": st.session_state.get("pending_product_category", "All"),
+            "max_price": None
+        })
+
+        st.rerun()
+
+    # Product search / follow-up.
+    search_query = prepare_chat_search_query(query)
+
+    with st.spinner("🤖 BUVVAS is finding the best products for you..."):
+        products, category, max_price, contextual_query = get_search_products(search_query)
+
+    answer = natural_search_answer(
+        query, products, category, max_price
     )
 
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": answer,
-            "products": products,
-            "category": category,
-            "max_price": max_price
-        }
-    )
+    st.session_state.messages.append({
+        "role": "user",
+        "content": query
+    })
+
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": answer,
+        "products": products,
+        "category": category,
+        "max_price": max_price
+    })
 
     st.session_state.last_products = products
     st.session_state.selected_category = category
+
+    update_conversation_memory(
+        contextual_query,
+        category,
+        max_price,
+        products
+    )
+
+    st.session_state.pending_product_category = category
+    st.session_state.pending_product_request = contextual_query
 
     st.session_state.cheaper_results = []
     st.session_state.cheaper_for = ""
@@ -1357,11 +1830,14 @@ for message_index, message in enumerate(
 
     elif role == "assistant":
 
-        st.html(f"""
-        <div class="chat-answer">
-            {clean_text(message.get("content", ""))}
-        </div>
-        """)
+        st.markdown(
+            f"""
+            <div class="chat-answer">
+                {clean_text(message.get("content", ""))}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
         products = message.get(
             "products",
@@ -1487,6 +1963,6 @@ if st.session_state.comparison_products:
 
 st.html("""
 <div class="footer">
-    BUVVAS AI Shopping Assistant • Powered by MCP
+    BUVVAS AI Shopping Assistant • Powered by MCP • 🧠 Conversational Memory
 </div>
 """)
