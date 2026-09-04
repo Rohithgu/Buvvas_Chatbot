@@ -1090,7 +1090,6 @@ st.markdown(
 cat1, cat2, cat3, cat4, cat5 = st.columns(5)
 
 categories = [
-    ("All", "All"),
     ("📷 Barcode", "Barcode"),
     ("🖨️ Printer", "Printer"),
     ("💰 Cash Drawer", "Cash Drawer"),
