@@ -1,0 +1,7 @@
+streamlit
+mcp
+requests
+beautifulsoup4
+pandas
+python-dotenv
+openai
