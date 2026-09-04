@@ -461,6 +461,118 @@ div.stButton > button[kind="primary"] {
     border-top: 1px solid rgba(255,255,255,0.07);
 }
 
+
+/* ============================================================
+   BUVVAS - DEPLOYED STREAMLIT CHAT INPUT FIX
+   ============================================================ */
+
+/* Keep the entire Streamlit page dark */
+html, body,
+[data-testid="stAppViewContainer"],
+[data-testid="stApp"],
+section[data-testid="stMain"],
+[data-testid="stMainBlockContainer"] {
+    background: #090a18 !important;
+}
+
+/* Streamlit's fixed bottom chat area */
+[data-testid="stBottom"] {
+    background: #090a18 !important;
+    background-color: #090a18 !important;
+    border-top: none !important;
+    box-shadow: none !important;
+}
+
+/* Inner bottom block */
+[data-testid="stBottomBlockContainer"] {
+    background: #090a18 !important;
+    background-color: #090a18 !important;
+    border-top: none !important;
+    box-shadow: none !important;
+    padding-top: 10px !important;
+    padding-bottom: 14px !important;
+}
+
+/* Chat input wrapper */
+[data-testid="stChatInput"] {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    margin: 0 auto !important;
+}
+
+/* Actual input box */
+[data-testid="stChatInput"] > div {
+    background: #171827 !important;
+    background-color: #171827 !important;
+    border: 1px solid rgba(150, 110, 255, 0.35) !important;
+    border-radius: 16px !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35) !important;
+}
+
+/* Text area */
+[data-testid="stChatInput"] textarea {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #ffffff !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    caret-color: #ffffff !important;
+}
+
+/* Placeholder */
+[data-testid="stChatInput"] textarea::placeholder {
+    color: #9d9eaf !important;
+    opacity: 1 !important;
+}
+
+/* Focus state — no red outline */
+[data-testid="stChatInput"] > div:focus-within {
+    border: 1px solid rgba(150, 110, 255, 0.70) !important;
+    box-shadow: 0 4px 20px rgba(113, 70, 220, 0.20) !important;
+}
+
+/* Send button */
+[data-testid="stChatInput"] button {
+    background: transparent !important;
+    color: #ffffff !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Prevent white form/container backgrounds */
+[data-testid="stBottom"] form,
+[data-testid="stBottom"] form > div,
+[data-testid="stChatInput"] form,
+[data-testid="stChatInput"] form > div {
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Remove any generic white background Streamlit may put around
+   the bottom area */
+[data-testid="stBottom"] *,
+[data-testid="stChatInput"] * {
+    scrollbar-color: #34344a #090a18;
+}
+
+/* Keep the footer/page area dark */
+footer,
+[data-testid="stFooter"] {
+    background: #090a18 !important;
+}
+
+/* Mobile / narrow screens */
+@media (max-width: 768px) {
+    [data-testid="stBottomBlockContainer"] {
+        padding-left: 10px !important;
+        padding-right: 10px !important;
+    }
+}
+
 </style>
 """)
 
